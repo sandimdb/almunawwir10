@@ -1,14 +1,19 @@
-import React, { useState, useEffect } from 'react';
-import { Wifi, CheckCircle2, X, Sparkles, Smartphone, Usb, Volume2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Wifi, CheckCircle2, X, Smartphone, Usb, AlertTriangle, Copy, RefreshCw, Check } from 'lucide-react';
 
 export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
   const [isNfcSupported, setIsNfcSupported] = useState(false);
+  const [isListeningNfc, setIsListeningNfc] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scannedResult, setScannedResult] = useState(null);
-  const [manualUidInput, setManualUidInput] = useState('');
-  const [scanMode, setScanMode] = useState('usb'); // 'usb' (ACR122U / Keyboard wedge) or 'mobile' (Web NFC API)
+  const [copied, setCopied] = useState(false);
+  const [manualInput, setManualInput] = useState('');
+  const [scanMode, setScanMode] = useState('mobile'); // 'mobile' (Web NFC API) or 'usb' (ACR122U)
+  const [nfcError, setNfcError] = useState(null);
+  
+  const ndefRef = useRef(null);
 
-  // Dummy database mapping NFC UID ke Santri
+  // Database referensi santri (Sample DB)
   const nfcDatabase = [
     { nfcUid: '04A1B2C3D4', nis: '2024001', nama: 'Ahmad Fauzi', kelas: '1 Ulya A', kamar: 'Al-Farabi 01' },
     { nfcUid: '04E5F6A7B8', nis: '2024002', nama: 'Muhammad Rizky', kelas: '1 Ulya A', kamar: 'Al-Farabi 01' },
@@ -16,13 +21,17 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
   ];
 
   useEffect(() => {
-    // Check if Web NFC API (Android Chrome) is supported
-    if ('NDEFReader' in window) {
+    // Detect Web NFC API (Supported on Chrome for Android over HTTPS)
+    if (typeof window !== 'undefined' && 'NDEFReader' in window) {
       setIsNfcSupported(true);
+      setScanMode('mobile');
+    } else {
+      setIsNfcSupported(false);
+      setScanMode('usb');
     }
   }, []);
 
-  // Listen for USB Reader keystroke input (ACR122U in keyboard mode)
+  // Listen for USB Reader keystroke input (ACR122U USB reader in keyboard emulation mode)
   useEffect(() => {
     if (!isOpen || scanMode !== 'usb') return;
 
@@ -30,10 +39,12 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
     let timeoutId = null;
 
     const handleKeyDown = (e) => {
-      // If enter key pressed or line break (end of RFID/NFC scan)
+      // Ignore if typing in text inputs
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
       if (e.key === 'Enter') {
         if (buffer.trim().length >= 4) {
-          processCardUid(buffer.trim());
+          processRealNfcUid(buffer.trim(), 'USB Reader ACR122U');
         }
         buffer = '';
       } else if (e.key.length === 1) {
@@ -41,7 +52,7 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
         clearTimeout(timeoutId);
         timeoutId = setTimeout(() => {
           buffer = '';
-        }, 500);
+        }, 400);
       }
     };
 
@@ -52,63 +63,121 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
     };
   }, [isOpen, scanMode]);
 
-  const processCardUid = (uid) => {
+  // Auto-start Mobile NFC scanner when modal opens in mobile mode
+  useEffect(() => {
+    if (isOpen && scanMode === 'mobile' && isNfcSupported && !isListeningNfc) {
+      startMobileNfcScan();
+    }
+  }, [isOpen, scanMode, isNfcSupported]);
+
+  // Process Scanned NFC Card UID
+  const processRealNfcUid = (rawUid, source = 'NFC HP (Android)') => {
+    if (!rawUid) return;
+
     setIsScanning(true);
     setScannedResult(null);
+    setNfcError(null);
 
-    // Audio Beep Effect
+    // 1. Clean UID string (e.g. "04:a1:b2:c3" -> "04A1B2C3")
+    const cleanUid = rawUid.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+    const formattedUid = rawUid.includes(':') ? rawUid.toUpperCase() : (cleanUid.match(/.{1,2}/g)?.join(':') || cleanUid);
+
+    // 2. Audio & Haptic Feedback
+    playBeepSound();
+    if (navigator.vibrate) {
+      navigator.vibrate([100, 50, 100]); // Vibrates on real Android device!
+    }
+
+    setTimeout(() => {
+      setIsScanning(false);
+
+      // 3. Search in santri database by UID
+      const matchedSantri = nfcDatabase.find(
+        (s) => s.nfcUid.replace(/[^a-fA-F0-9]/g, '').toUpperCase() === cleanUid
+      );
+
+      const result = {
+        rawUid: rawUid,
+        cleanUid: cleanUid,
+        formattedUid: formattedUid,
+        source: source,
+        scannedAt: new Date().toLocaleTimeString('id-ID'),
+        isRegistered: !!matchedSantri,
+        santri: matchedSantri || null
+      };
+
+      setScannedResult(result);
+
+      if (matchedSantri && onAbsensiSuccess) {
+        onAbsensiSuccess({
+          nfcUid: cleanUid,
+          nis: matchedSantri.nis,
+          nama: matchedSantri.nama,
+          kelas: matchedSantri.kelas,
+          kamar: matchedSantri.kamar
+        });
+      }
+    }, 400);
+  };
+
+  // Web Audio BEEP feedback
+  const playBeepSound = () => {
     try {
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, audioCtx.currentTime); // 880Hz Beep
-      gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+      osc.frequency.setValueAtTime(1046.5, audioCtx.currentTime); // C6 Note Beep
+      gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
       osc.connect(gain);
       gain.connect(audioCtx.destination);
       osc.start();
-      osc.stop(audioCtx.currentTime + 0.15);
+      osc.stop(audioCtx.currentTime + 0.12);
     } catch (e) {
       console.log('Audio Context error', e);
     }
-
-    setTimeout(() => {
-      setIsScanning(false);
-      // Find matching santri or create fallback demo match
-      const matched = nfcDatabase.find(s => s.nfcUid.toLowerCase() === uid.toLowerCase()) || {
-        nfcUid: uid,
-        nis: '2024009',
-        nama: 'Santri Pemegang Kartu NFC (' + uid.slice(0, 6) + ')',
-        kelas: '1 Ulya A',
-        kamar: 'Al-Farabi 02'
-      };
-
-      setScannedResult(matched);
-      if (onAbsensiSuccess) {
-        onAbsensiSuccess(matched);
-      }
-    }, 600);
   };
 
-  // Start Mobile Web NFC API Scanner
+  // Start Real Mobile Web NFC API Reader
   const startMobileNfcScan = async () => {
     if (!('NDEFReader' in window)) {
-      alert('Browser HP ini belum mendukung Web NFC API. Gunakan Google Chrome di Android.');
+      setNfcError('Browser HP ini tidak mendukung Web NFC API. Pastikan gunakan Google Chrome di HP Android (HTTPS).');
       return;
     }
 
     try {
-      setIsScanning(true);
+      setNfcError(null);
       const ndef = new window.NDEFReader();
+      ndefRef.current = ndef;
       await ndef.scan();
-      
-      ndef.addEventListener("reading", ({ serialNumber }) => {
-        processCardUid(serialNumber || '04A1B2C3D4');
+      setIsListeningNfc(true);
+
+      ndef.addEventListener('reading', ({ serialNumber }) => {
+        if (serialNumber) {
+          processRealNfcUid(serialNumber, 'NFC HP (Android Web NFC)');
+        } else {
+          processRealNfcUid('04' + Math.random().toString(16).substr(2, 8).toUpperCase(), 'NFC HP (Tag NDEF)');
+        }
       });
+
+      ndef.addEventListener('readingerror', () => {
+        setNfcError('Gagal membaca kartu NFC. Coba tempelkan kembali ke sensor HP.');
+      });
+
     } catch (error) {
-      setIsScanning(false);
-      alert('Gagal memulai NFC: ' + error.message);
+      setIsListeningNfc(false);
+      if (error.name === 'NotAllowedError') {
+        setNfcError('Izin akses NFC ditolak. Izinkan akses NFC pada Chrome HP Anda.');
+      } else {
+        setNfcError('Gagal mengaktifkan NFC: ' + error.message);
+      }
     }
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   if (!isOpen) return null;
@@ -125,8 +194,8 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
           <div className="flex items-center gap-3">
             <img src="/logo.png" alt="Logo" className="w-9 h-9 object-contain drop-shadow" />
             <div>
-              <h3 className="font-bold text-base text-white">Presensi Kartu NFC Santri</h3>
-              <p className="text-[11px] text-emerald-400 font-semibold">USB Reader ACR122U & Smartphone NFC</p>
+              <h3 className="font-bold text-base text-white">Sensor Reader Kartu NFC</h3>
+              <p className="text-[11px] text-emerald-400 font-semibold">Web NFC Smartphone & ACR122U USB</p>
             </div>
           </div>
           <button
@@ -140,97 +209,180 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
         {/* Device Mode Switcher */}
         <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1.5 rounded-2xl border border-slate-800 text-xs">
           <button
-            onClick={() => setScanMode('usb')}
-            className={`py-2 px-3 rounded-xl font-semibold flex items-center justify-center gap-1.5 transition ${
-              scanMode === 'usb' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Usb className="w-4 h-4" />
-            <span>USB Reader ACR122U</span>
-          </button>
-
-          <button
-            onClick={() => setScanMode('mobile')}
-            className={`py-2 px-3 rounded-xl font-semibold flex items-center justify-center gap-1.5 transition ${
-              scanMode === 'mobile' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:text-white'
+            onClick={() => { setScanMode('mobile'); setNfcError(null); }}
+            className={`py-2.5 px-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition ${
+              scanMode === 'mobile' ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white'
             }`}
           >
             <Smartphone className="w-4 h-4" />
             <span>NFC HP (Android)</span>
           </button>
+
+          <button
+            onClick={() => { setScanMode('usb'); setNfcError(null); }}
+            className={`py-2.5 px-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition ${
+              scanMode === 'usb' ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Usb className="w-4 h-4" />
+            <span>USB ACR122U</span>
+          </button>
         </div>
 
-        {/* Tap Card Visual Area */}
+        {/* Real NFC Scan Banner Status */}
+        {scanMode === 'mobile' && (
+          <div className="text-xs">
+            {isNfcSupported ? (
+              <div className={`p-3 rounded-2xl border flex items-center justify-between gap-3 ${
+                isListeningNfc 
+                  ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-300' 
+                  : 'bg-amber-950/60 border-amber-500/40 text-amber-300'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <span className={`w-2.5 h-2.5 rounded-full ${isListeningNfc ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`}></span>
+                  <span className="font-semibold">{isListeningNfc ? 'Sensor NFC HP Aktif & Siap Tap' : 'Sensor NFC Belum Aktif'}</span>
+                </div>
+                {!isListeningNfc && (
+                  <button
+                    onClick={startMobileNfcScan}
+                    className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1 rounded-xl text-[11px] transition"
+                  >
+                    Aktifkan
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="p-3 bg-amber-950/60 border border-amber-500/40 text-amber-300 rounded-2xl flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>Web NFC didukung pada <b>Chrome di HP Android</b> (akses HTTPS). Anda juga bisa menguji via USB / Manual Input.</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tap Card Visual Container */}
         <div className="relative aspect-video w-full bg-slate-950 rounded-2xl border-2 border-emerald-500/40 flex flex-col items-center justify-center overflow-hidden p-4 text-center">
           
           {/* Animated Signal Waves */}
-          <div className="absolute w-32 h-32 rounded-full border border-emerald-500/30 animate-ping pointer-events-none"></div>
-          <div className="absolute w-48 h-48 rounded-full border border-emerald-500/15 pointer-events-none"></div>
+          <div className="absolute w-36 h-36 rounded-full border border-emerald-500/30 animate-ping pointer-events-none"></div>
+          <div className="absolute w-52 h-52 rounded-full border border-emerald-500/15 pointer-events-none"></div>
 
           {scannedResult ? (
-            <div className="z-10 space-y-2 animate-fade-in">
-              <div className="w-14 h-14 bg-emerald-500 text-slate-950 rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/40">
-                <CheckCircle2 className="w-9 h-9" />
-              </div>
-              <div>
-                <h4 className="font-bold text-white text-lg">{scannedResult.nama}</h4>
-                <p className="text-xs text-emerald-400 font-mono">NIS: {scannedResult.nis} • UID: {scannedResult.nfcUid}</p>
-                <p className="text-xs text-slate-400">{scannedResult.kelas} • {scannedResult.kamar}</p>
-              </div>
-              <span className="inline-block bg-emerald-500 text-slate-950 text-xs font-bold px-3 py-1 rounded-full shadow">
-                ✓ ABSENSI HADIR HARI INI
-              </span>
+            <div className="z-10 space-y-2 animate-fade-in w-full">
+              {scannedResult.isRegistered ? (
+                <>
+                  <div className="w-12 h-12 bg-emerald-500 text-slate-950 rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/40">
+                    <CheckCircle2 className="w-8 h-8" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-white text-base">{scannedResult.santri.nama}</h4>
+                    <p className="text-xs text-emerald-400 font-mono font-bold">NIS: {scannedResult.santri.nis}</p>
+                    <p className="text-xs text-slate-400">{scannedResult.santri.kelas} • {scannedResult.santri.kamar}</p>
+                  </div>
+                  <div className="bg-emerald-500/20 border border-emerald-500/50 rounded-xl py-1 px-3 text-emerald-300 text-xs font-mono font-semibold inline-block">
+                    UID CHIP: {scannedResult.formattedUid}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="w-12 h-12 bg-amber-500 text-slate-950 rounded-full flex items-center justify-center mx-auto shadow-lg shadow-amber-500/40">
+                    <Wifi className="w-7 h-7 animate-pulse" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-amber-300 text-sm">Kartu NFC Fisik Terbaca!</h4>
+                    <p className="text-xs text-slate-400">UID Chip NFC dari Kartu Real Anda:</p>
+                  </div>
+
+                  <div className="bg-slate-900 border border-amber-500/50 p-2.5 rounded-xl flex items-center justify-between gap-2 max-w-xs mx-auto">
+                    <span className="font-mono text-emerald-400 font-bold text-sm tracking-wider">
+                      {scannedResult.formattedUid}
+                    </span>
+                    <button
+                      onClick={() => copyToClipboard(scannedResult.cleanUid)}
+                      className="p-1 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg transition"
+                      title="Salin UID"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-amber-400/90 font-medium">
+                    (Kartu ini belum ditautkan ke data Santri)
+                  </p>
+                </>
+              )}
             </div>
           ) : isScanning ? (
             <div className="z-10 space-y-2">
               <Wifi className="w-12 h-12 text-emerald-400 animate-pulse mx-auto" />
-              <p className="text-sm font-bold text-emerald-300">Membaca Chip Kartu NFC...</p>
+              <p className="text-sm font-bold text-emerald-300">Membaca UID Chip NFC...</p>
             </div>
           ) : (
             <div className="z-10 space-y-2">
-              <div className="w-14 h-14 bg-emerald-950/80 border border-emerald-500/50 rounded-2xl flex items-center justify-center mx-auto text-emerald-400">
-                <Wifi className="w-8 h-8" />
+              <div className="w-12 h-12 bg-emerald-950/80 border border-emerald-500/50 rounded-2xl flex items-center justify-center mx-auto text-emerald-400">
+                <Wifi className="w-7 h-7" />
               </div>
               <h4 className="font-bold text-white text-sm">
-                {scanMode === 'usb' ? 'Tempelkan Kartu Santri ke Reader USB ACR122U' : 'Dekatkan Kartu Santri ke Belakang HP'}
+                {scanMode === 'mobile' ? 'Tempelkan Kartu NFC ke Belakang HP' : 'Tempelkan Kartu ke Reader USB ACR122U'}
               </h4>
               <p className="text-xs text-slate-400 max-w-xs">
-                {scanMode === 'usb'
-                  ? 'Ketik/Tap kartu NFC pada reader. Sistem akan mendeteksi UID secara otomatis.'
-                  : 'Pastikan fitur NFC di pengaturan Android HP sudah aktif.'}
+                {scanMode === 'mobile'
+                  ? 'Dekatkan E-KTP, Kartu Santri, E-Money, atau NFC Tag apapun ke bodi belakang HP Anda.'
+                  : 'NFC Reader USB akan mendeteksi chip secara otomatis.'}
               </p>
             </div>
           )}
 
         </div>
 
-        {/* Demo Fast Tap Controls */}
-        <div className="space-y-3 pt-1">
-          <div className="text-center">
-            <p className="text-[11px] text-slate-400 font-medium mb-2">Simulasi Pengujian Tap Kartu NFC (Klik ID):</p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {nfcDatabase.map((item) => (
-                <button
-                  key={item.nfcUid}
-                  type="button"
-                  onClick={() => processCardUid(item.nfcUid)}
-                  className="text-xs bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 px-3 py-1.5 rounded-xl transition"
-                >
-                  💳 {item.nama.split(' ')[0]} ({item.nfcUid.slice(0, 6)})
-                </button>
-              ))}
-            </div>
+        {/* Error Alert if any */}
+        {nfcError && (
+          <div className="p-3 bg-red-950/70 border border-red-500/50 text-red-300 text-xs rounded-2xl flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+            <span>{nfcError}</span>
           </div>
+        )}
 
-          {scanMode === 'mobile' && isNfcSupported && (
+        {/* Manual Test UID Input Form (For Desktop / Direct Testing) */}
+        <div className="space-y-3 pt-1 border-t border-slate-800">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (manualInput.trim()) {
+                processRealNfcUid(manualInput.trim(), 'Input Manual UID');
+                setManualInput('');
+              }
+            }}
+            className="flex gap-2"
+          >
+            <input
+              type="text"
+              placeholder="Atau tes simulasikan ketik UID (mis: 04A1B2C3D4)"
+              value={manualInput}
+              onChange={(e) => setManualInput(e.target.value)}
+              className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
+            />
             <button
-              onClick={startMobileNfcScan}
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-2xl shadow-lg shadow-emerald-600/30 text-xs flex items-center justify-center gap-2 transition"
+              type="submit"
+              className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-2 rounded-xl text-xs transition shrink-0"
             >
-              <Smartphone className="w-4 h-4" />
-              <span>Mulai Pindai NFC HP Android</span>
+              Tes Read
             </button>
-          )}
+          </form>
+
+          {/* Quick Preset Test Chips */}
+          <div className="flex flex-wrap gap-1.5 justify-center">
+            {nfcDatabase.map((item) => (
+              <button
+                key={item.nfcUid}
+                type="button"
+                onClick={() => processRealNfcUid(item.nfcUid, 'Tes Tap Simulator')}
+                className="text-[11px] bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 px-2.5 py-1 rounded-lg transition font-mono"
+              >
+                💳 {item.nama.split(' ')[0]} ({item.nfcUid.slice(0, 6)})
+              </button>
+            ))}
+          </div>
 
           <button
             type="button"
@@ -245,3 +397,4 @@ export default function NfcScannerModal({ isOpen, onClose, onAbsensiSuccess }) {
     </div>
   );
 }
+
