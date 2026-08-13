@@ -1,4 +1,11 @@
 {
   "framework": "vite",
-  "rootDirectory": "fe"
+  "buildCommand": "npm --prefix fe run build",
+  "outputDirectory": "fe/dist",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
 }
