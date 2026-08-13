@@ -1,5 +1,6 @@
 {
   "framework": "vite",
+  "installCommand": "npm --prefix fe install",
   "buildCommand": "npm --prefix fe run build",
   "outputDirectory": "fe/dist",
   "rewrites": [

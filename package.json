@@ -2,8 +2,9 @@
   "name": "ponpes-almunawwir10-root",
   "private": true,
   "scripts": {
+    "postinstall": "cd fe && npm install",
     "dev": "npm --prefix fe run dev",
-    "build": "npm --prefix fe install && npm --prefix fe run build",
+    "build": "npm --prefix fe run build",
     "preview": "npm --prefix fe run preview"
   }
 }
