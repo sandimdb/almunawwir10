@@ -1,0 +1,9 @@
+{
+  "name": "ponpes-almunawwir10-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix fe run dev",
+    "build": "npm --prefix fe run build",
+    "preview": "npm --prefix fe run preview"
+  }
+}
